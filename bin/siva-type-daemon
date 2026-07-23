@@ -49,6 +49,7 @@ LLAMA_PORT = 8090
 
 WHISPER_MODEL = os.path.join(HOME, ".local/share/siva/ggml-base.en.bin")
 WHISPER_FALLBACK = os.path.join(HOME, ".local/share/voice-type/models/ggml-tiny.bin")
+MIC_FILE = os.path.join(HOME, ".local/share/siva/mic.json")  # shared with siva-daemon (F8)
 
 STYLES = ["professional", "nerdy", "intelligent"]
 PERSONA = {
@@ -162,23 +163,49 @@ class SivaType:
             self.hide_timer = None
 
     # ── audio (same battle-tested path as siva-daemon) ────────────────
-    def find_mic(self):
-        """Prefer the Scarlett 2i2 hardware source; its node description
-        varies with the card profile, so scan the whole Sources section."""
+    def list_sources(self):
+        """All selectable audio inputs as [{id, name}] — hardware Sources
+        plus filter-chain / loopback Audio/Source nodes, and a synthetic
+        'System default' entry. Mirrors siva-daemon's picker."""
         _, out = sh(["wpctl", "status"])
-        in_sources = False
+        sources = [{"id": "", "name": "System default"}]
+        section = None
         for line in out.splitlines():
             if "Sources:" in line:
-                in_sources = True
-                continue
-            if not in_sources:
-                continue
-            m = re.search(r"(\d+)\.\s+(.+?)\s*\[vol", line)
-            if not m:
-                in_sources = False
-                continue
-            if re.search(r"scarlett|focusrite", m.group(2), re.I):
-                return m.group(1), m.group(2)
+                section = "sources"; continue
+            if "Filters:" in line:
+                section = "filters"; continue
+            if any(h in line for h in ("Sinks:", "Devices:", "Streams:")):
+                section = None; continue
+            if section == "sources":
+                m = re.search(r"(\d+)\.\s+(.+?)\s*\[vol", line)
+                if m:
+                    sources.append({"id": m.group(1), "name": m.group(2).strip()})
+            elif section == "filters":
+                m = re.search(r"(\d+)\.\s+(\S.*?)\s+\[Audio/Source\]", line)
+                if m:
+                    sources.append({"id": m.group(1), "name": m.group(2).strip()})
+        return sources
+
+    def find_mic(self):
+        """Honor the input chosen in SIVA's mic selector (~/.local/share/
+        siva/mic.json, matched by name), else auto-detect a Scarlett/
+        Focusrite, else fall back to the PipeWire default."""
+        sources = self.list_sources()
+        try:
+            with open(MIC_FILE) as f:
+                saved = json.load(f).get("name", "")
+        except Exception:
+            saved = ""
+        if saved == "System default":
+            return None, "System default"
+        if saved:
+            for s in sources:
+                if s["name"] == saved:
+                    return s["id"], s["name"]
+        for s in sources:
+            if s["id"] and re.search(r"scarlett|focusrite", s["name"], re.I):
+                return s["id"], s["name"]
         return None, "default source"
 
     def wav_is_silent(self, wav):
@@ -522,4 +549,13 @@ class SivaType:
 
 
 if __name__ == "__main__":
+    # Singleton guard: if another instance already holds the lock, exit
+    # quietly. Prevents the toggle-script respawn path from stacking
+    # daemons that steal each other's socket via unlink+rebind.
+    import fcntl
+    _singleton_lock = open("/tmp/siva-type-daemon.lock", "w")
+    try:
+        fcntl.flock(_singleton_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        raise SystemExit(0)
     SivaType().serve()

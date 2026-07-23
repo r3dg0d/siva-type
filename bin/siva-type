@@ -6,8 +6,7 @@
 SOCK=/tmp/siva-type.sock
 
 if ! socat -u OPEN:/dev/null UNIX-CONNECT:"$SOCK" 2>/dev/null; then
-    rm -f "$SOCK"
-    setsid -f siva-type-daemon >/dev/null 2>&1
+    setsid -f "$HOME/.local/bin/siva-type-daemon" >/dev/null 2>&1
     for _ in $(seq 1 50); do
         [[ -S "$SOCK" ]] && break
         sleep 0.1
